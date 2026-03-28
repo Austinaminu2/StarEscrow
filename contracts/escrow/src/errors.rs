@@ -15,4 +15,5 @@ pub enum EscrowError {
     IntervalNotElapsed = 10,
     RecurrenceComplete = 11,
     NotRecurring = 12,
+    InvalidDeadline = 13,
 }

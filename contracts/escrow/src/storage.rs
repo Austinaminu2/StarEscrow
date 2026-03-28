@@ -178,7 +178,7 @@ pub fn read_allowed_tokens(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
         .get(&AllowListKey::Tokens)
-        .unwrap_or_default()
+        .unwrap_or_else(|| Vec::new(env))
 }
 
 pub fn write_allowed_tokens(env: &Env, tokens: &Vec<Address>) {
@@ -190,18 +190,23 @@ pub fn add_to_allowlist(env: &Env, token: Address) -> bool {
     if tokens.contains(&token) {
         false
     } else {
-        tokens.push(token);
+        tokens.push_back(token);
         write_allowed_tokens(env, &tokens);
         true
     }
 }
 
 pub fn remove_from_allowlist(env: &Env, token: Address) -> bool {
-    let mut tokens = read_allowed_tokens(env);
+    let tokens = read_allowed_tokens(env);
     let before = tokens.len();
-    tokens.retain(|t| t != &token);
-    if tokens.len() < before {
-        write_allowed_tokens(env, &tokens);
+    let mut new_tokens = Vec::new(env);
+    for t in tokens.iter() {
+        if t != token {
+            new_tokens.push_back(t);
+        }
+    }
+    if new_tokens.len() < before {
+        write_allowed_tokens(env, &new_tokens);
         true
     } else {
         false

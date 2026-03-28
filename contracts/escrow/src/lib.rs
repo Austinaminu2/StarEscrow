@@ -10,7 +10,6 @@ pub use errors::EscrowError;
 pub use storage::{EscrowData, EscrowStatus, ProtocolConfig, YieldRecipient};
 
 use crate::r#yield::YieldProtocolClient;
-use crate::storage::{RateLimitConfig, YieldRecipient};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
@@ -85,18 +84,6 @@ impl EscrowContract {
             return Err(EscrowError::InvalidAmount);
         }
 
-        // Validate threshold
-        let m = approvers.len() as u32;
-        let threshold = if approvers.is_empty() {
-            // Single-payer mode: payer is the sole approver
-            1u32
-        } else {
-            if required_approvals == 0 || required_approvals > m {
-                return Err(EscrowError::InvalidThreshold);
-            }
-            required_approvals
-        };
-
         let allowed = storage::read_allowed_tokens(&env);
         if !allowed.is_empty() && !allowed.contains(&token) {
             return Err(EscrowError::TokenNotAllowed);
@@ -170,20 +157,19 @@ impl EscrowContract {
         data.payer.require_auth();
 
         let client = token::Client::new(&env, &data.token);
-        let (freelancer_amount, fee_amount) = if storage::has_config(&env) {
+        let freelancer_amount = if storage::has_config(&env) {
             let config = storage::load_config(&env);
             let fee = data.amount * (config.fee_bps as i128) / 10000;
             if fee > 0 {
                 client.transfer(&env.current_contract_address(), &config.fee_collector, &fee);
             }
+            data.amount - fee
         } else {
-            (data.amount, 0)
+            data.amount
         };
-        let _ = fee_amount;
 
         client.transfer(&env.current_contract_address(), &data.freelancer, &freelancer_amount);
         events::payment_released(&env, &data.freelancer, freelancer_amount);
-        let _ = fee_amount;
         data.status = EscrowStatus::Completed;
         storage::save_escrow(&env, &data);
         storage::extend_ttl(&env);
@@ -316,6 +302,38 @@ impl EscrowContract {
         Ok(())
     }
 
+    pub fn transfer_payer(env: Env, new_payer: Address) -> Result<(), EscrowError> {
+        Self::assert_not_paused(&env)?;
+        let mut data = storage::load_escrow(&env);
+        data.payer.require_auth();
+        let old = data.payer.clone();
+        data.payer = new_payer.clone();
+        storage::save_escrow(&env, &data);
+        events::payer_transferred(&env, &old, &new_payer);
+        storage::extend_ttl(&env);
+        Ok(())
+    }
+
+    /// Payer extends the escrow deadline to a strictly later timestamp.
+    pub fn extend_deadline(env: Env, new_deadline: u64) -> Result<(), EscrowError> {
+        Self::assert_not_paused(&env)?;
+        let mut data = storage::load_escrow(&env);
+        data.payer.require_auth();
+        let current = match data.deadline {
+            Some(d) => d,
+            None => return Err(EscrowError::InvalidDeadline),
+        };
+        if new_deadline <= current {
+            return Err(EscrowError::InvalidDeadline);
+        }
+        let old_deadline = current;
+        data.deadline = Some(new_deadline);
+        storage::save_escrow(&env, &data);
+        events::deadline_extended(&env, old_deadline, new_deadline);
+        storage::extend_ttl(&env);
+        Ok(())
+    }
+
     pub fn get_status(env: Env) -> EscrowStatus {
         storage::load_escrow(&env).status
     }
@@ -351,22 +369,6 @@ impl EscrowContract {
         if storage::has_config(env) && storage::load_config(env).paused {
             return Err(EscrowError::Paused);
         }
-        Ok(())
-    }
-
-    fn withdraw_funds(
-        env: &Env,
-        data: &mut EscrowData,
-        recipient: Address,
-    ) -> Result<(), EscrowError> {
-        let mut total = data.amount;
-        if let Some(ref protocol) = data.yield_protocol {
-            let yield_client = YieldProtocolClient::new(env, protocol);
-            let (principal, yield_accrued) = yield_client.withdraw(&data.principal_deposited);
-            total = principal + yield_accrued;
-        }
-        let client = token::Client::new(env, &data.token);
-        client.transfer(&env.current_contract_address(), &recipient, &total);
         Ok(())
     }
 }
